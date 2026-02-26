@@ -1,0 +1,22 @@
+services:
+  alpha-hours:
+    build: .
+    container_name: alpha-hours
+    restart: unless-stopped
+    ports:
+      - "${PORT:-3000}:3000"
+    volumes:
+      - alpha-hours-data:/app/data
+    environment:
+      - NODE_ENV=production
+      - PORT=3000
+      - DB_PATH=/app/data/worklog.db
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:3000/"]
+      interval: 30s
+      timeout: 3s
+      start_period: 5s
+
+volumes:
+  alpha-hours-data:
+    driver: local
