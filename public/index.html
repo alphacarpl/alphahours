@@ -175,7 +175,15 @@ function exportExcel(){
 }
 
 // ═══ RENDER ═══
-function render(){document.getElementById('app').innerHTML=renderApp();bind()}
+function render(){
+  var ae=document.activeElement;
+  var fid=ae&&ae.id||'';
+  var fsel=ae&&ae.selectionStart;
+  var fend=ae&&ae.selectionEnd;
+  document.getElementById('app').innerHTML=renderApp();
+  bind();
+  if(fid){var el=document.getElementById(fid);if(el){el.focus();try{el.setSelectionRange(fsel,fend)}catch(e){}}}
+}
 
 function renderApp(){
   const tst=S.toast?`<div class="toast" style="background:${S.toast.t==='error'?'var(--dg)':'var(--ac)'};color:${S.toast.t==='error'?'#fff':'var(--bg)'}">${esc(S.toast.m)}</div>`:'';
