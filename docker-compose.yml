@@ -12,10 +12,10 @@ services:
       - PORT=3000
       - DB_PATH=/app/data/worklog.db
     healthcheck:
-      test: ["CMD", "wget", "-qO-", "http://localhost:3000/"]
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:3000/"]
       interval: 30s
       timeout: 3s
-      start_period: 5s
+      start_period: 30s
 
 volumes:
   alpha-hours-data:
