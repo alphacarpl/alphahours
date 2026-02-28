@@ -51,6 +51,7 @@ db.exec(`
 // Add timeline columns if upgrading from older schema
 try { db.exec('ALTER TABLE entries ADD COLUMN timeline_content TEXT DEFAULT NULL'); } catch {}
 try { db.exec('ALTER TABLE entries ADD COLUMN timeline_filename TEXT DEFAULT NULL'); } catch {}
+try { db.exec('ALTER TABLE entries ADD COLUMN project_ids TEXT DEFAULT "[]"'); } catch {}
 
 app.use(cors());
 app.use(express.json({ limit: '2mb' }));
@@ -93,24 +94,26 @@ app.get('/api/entries', (req, res) => {
   if (project_id) { sql += ' AND e.project_id = ?'; params.push(project_id); }
   sql += ' ORDER BY e.date DESC, e.start_time DESC';
   const rows = db.prepare(sql).all(...params);
-  res.json(rows.map(r => ({ ...r, categories: JSON.parse(r.categories || '[]') })));
+  res.json(rows.map(r => ({ ...r, categories: JSON.parse(r.categories || '[]'), project_ids: JSON.parse(r.project_ids || '[]') })));
 });
 
 app.post('/api/entries', (req, res) => {
-  const { employee, date, start_time, end_time, break_min, minutes, note, categories, project_id, timeline_content, timeline_filename } = req.body;
+  const { employee, date, start_time, end_time, break_min, minutes, note, categories, project_id, project_ids, timeline_content, timeline_filename } = req.body;
   if (!employee || !date || !start_time || !end_time) return res.status(400).json({ error: 'Brakuje wymaganych pól' });
   const id = Date.now().toString(36) + Math.random().toString(36).slice(2, 7);
-  db.prepare(`INSERT INTO entries (id, employee, date, start_time, end_time, break_min, minutes, note, categories, project_id, timeline_content, timeline_filename)
-              VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
-    .run(id, employee, date, start_time, end_time, break_min || 0, minutes, note || '', JSON.stringify(categories || []), project_id || null, timeline_content || null, timeline_filename || null);
+  const pIds = project_ids || (project_id ? [project_id] : []);
+  db.prepare(`INSERT INTO entries (id, employee, date, start_time, end_time, break_min, minutes, note, categories, project_id, timeline_content, timeline_filename, project_ids)
+              VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+    .run(id, employee, date, start_time, end_time, break_min || 0, minutes, note || '', JSON.stringify(categories || []), project_id || null, timeline_content || null, timeline_filename || null, JSON.stringify(pIds));
   res.json({ id });
 });
 
 app.put('/api/entries/:id', (req, res) => {
-  const { employee, date, start_time, end_time, break_min, minutes, note, categories, project_id, timeline_content, timeline_filename } = req.body;
-  db.prepare(`UPDATE entries SET employee=?, date=?, start_time=?, end_time=?, break_min=?, minutes=?, note=?, categories=?, project_id=?, timeline_content=?, timeline_filename=?, updated_at=datetime('now')
+  const { employee, date, start_time, end_time, break_min, minutes, note, categories, project_id, project_ids, timeline_content, timeline_filename } = req.body;
+  const pIds = project_ids || (project_id ? [project_id] : []);
+  db.prepare(`UPDATE entries SET employee=?, date=?, start_time=?, end_time=?, break_min=?, minutes=?, note=?, categories=?, project_id=?, timeline_content=?, timeline_filename=?, project_ids=?, updated_at=datetime('now')
               WHERE id=?`)
-    .run(employee, date, start_time, end_time, break_min || 0, minutes, note || '', JSON.stringify(categories || []), project_id || null, timeline_content || null, timeline_filename || null, req.params.id);
+    .run(employee, date, start_time, end_time, break_min || 0, minutes, note || '', JSON.stringify(categories || []), project_id || null, timeline_content || null, timeline_filename || null, JSON.stringify(pIds), req.params.id);
   res.json({ ok: true });
 });
 
@@ -129,6 +132,51 @@ app.get('/api/stats', (req, res) => {
   const byEmployee = db.prepare(`SELECT employee, SUM(minutes) as mins, COUNT(*) as entries, COUNT(DISTINCT date) as days FROM entries WHERE ${where} GROUP BY employee ORDER BY mins DESC`).all(...params);
   const byDay = db.prepare(`SELECT date, SUM(minutes) as mins, COUNT(*) as entries FROM entries WHERE ${where} GROUP BY date ORDER BY date`).all(...params);
   res.json({ total, byEmployee, byDay });
+});
+
+app.post('/api/import', (req, res) => {
+  const { entries, projects } = req.body;
+  try {
+    const trx = db.transaction(() => {
+      db.exec('DELETE FROM entries; DELETE FROM projects;');
+      const ip = db.prepare('INSERT INTO projects (id, name, client, color, archived, created_at, updated_at) VALUES (?, ?, ?, ?, ?, COALESCE(?, datetime("now")), COALESCE(?, datetime("now")))');
+      for (let p of projects) ip.run(p.id, p.name, p.client, p.color, p.archived?1:0, p.created_at, p.updated_at);
+      const ie = db.prepare('INSERT INTO entries (id, employee, date, start_time, end_time, break_min, minutes, note, categories, project_id, timeline_content, timeline_filename, created_at, updated_at, project_ids) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, COALESCE(?, datetime("now")), COALESCE(?, datetime("now")), ?)');
+      for (let e of entries) ie.run(e.id, e.employee, e.date, e.start_time, e.end_time, e.break_min, e.minutes, e.note, typeof e.categories === 'string' ? e.categories : JSON.stringify(e.categories), e.project_id, e.timeline_content, e.timeline_filename, e.created_at, e.updated_at, typeof e.project_ids === 'string' ? e.project_ids : JSON.stringify(e.project_ids||[]));
+    });
+    trx();
+    res.json({ok:true});
+  } catch (err) {
+    res.status(500).json({error: err.message});
+  }
+});
+
+app.post('/api/ai/summary', async (req, res) => {
+  const { prompt, data, apiKey } = req.body;
+  if (!apiKey) return res.status(400).json({error: 'Brak klucza API'});
+  try {
+    const resp = await fetch('https://api.anthropic.com/v1/messages', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'x-api-key': apiKey,
+        'anthropic-version': '2023-06-01'
+      },
+      body: JSON.stringify({
+        model: 'claude-3-5-sonnet-20241022',
+        max_tokens: 1500,
+        messages: [{ role: 'user', content: prompt + data }]
+      })
+    });
+    if (!resp.ok) {
+        const err = await resp.text();
+        return res.status(resp.status).json({error: err});
+    }
+    const json = await resp.json();
+    res.json(json);
+  } catch (err) {
+    res.status(500).json({error: err.message});
+  }
 });
 
 // SPA fallback
